@@ -86,8 +86,7 @@ class GemService
         $transactions = Transaction::where('user_id', $userId);
 
         if (!$transactions->exists())
-            throw new \Exception("User not found.");
-            // throw new UserNotFoundException("User not found.");
+            throw new UserNotFoundException("User not found.");
 
         return $transactions->selectRaw("
                 SUM(CASE WHEN type='" . TransactionType::Deposit->value . "' THEN amount ELSE 0 END) - 
