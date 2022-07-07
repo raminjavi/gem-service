@@ -2,11 +2,13 @@
 
 namespace App\Services;
 
+use App\Enums\TransactionType;
+use App\Exceptions\GemNotAddedException;
+use App\Exceptions\GemNotSpentException;
+use App\Exceptions\NotEnoughGems;
 use App\Models\Gem;
 use App\Models\Transaction;
-use App\Enums\TransactionType;
-use App\Exceptions\NotEnoughGems;
-use App\Exceptions\UserNotFoundException;
+use Illuminate\Support\Facades\DB;
 
 class GemService
 {
@@ -18,23 +20,31 @@ class GemService
      * @param integer $amount
      * @param string $tag
      * @return int $userTotalGems
-     * @throws \Exception
+     * @throws GemNotAddedException
      */
     public function add(int $userId, int $amount, string $tag): int
     {
-        Transaction::create([
-            'tag' => $tag,
-            'user_id' => $userId,
-            'amount' => $amount,
-            'type' => TransactionType::Deposit,
-        ]);
+        $userTotalGems = Gem::getQuantity($userId) + $amount;
 
-        $userTotalGems = $this->calculateTotalGems($userId);
+        try {
+            DB::transaction(function () use ($userId, $amount, $tag, $userTotalGems) {
 
-        Gem::updateOrCreate(
-            ['user_id' => $userId],
-            ['quantity' => $userTotalGems]
-        );
+                Transaction::create([
+                    'tag' => $tag,
+                    'user_id' => $userId,
+                    'amount' => $amount,
+                    'type' => TransactionType::Deposit,
+                ]);
+
+                Gem::updateOrCreate(
+                    ['user_id' => $userId],
+                    ['quantity' => $userTotalGems]
+                );
+
+            });
+        } catch (\Exception $ex) {
+            throw new GemNotAddedException("Cannot add gems to User: {$ex->getMessage()}");
+        }
 
         return $userTotalGems;
     }
@@ -47,50 +57,35 @@ class GemService
      * @param integer $amount
      * @param string $tag
      * @return int $userTotalGemsAfterSpend
-     * @throws \Exception|\App\Exceptions\NotEnoughGems|\App\Exceptions\UserNotFoundException
+     * @throws NotEnoughGems|GemNotSpentException
      */
     public function spend(int $userId, int $amount, string $tag): int
     {
-        $userTotalGems = $this->calculateTotalGems($userId);
+        $userTotalGems = Gem::getQuantity($userId);
 
         if ($userTotalGems < $amount)
             throw new NotEnoughGems("User does not have enough gems.");
 
-        Transaction::create([
-            'tag' => $tag,
-            'user_id' => $userId,
-            'amount' => $amount,
-            'type' => TransactionType::Withdraw,
-        ]);
-
         $userTotalGemsAfterSpend = $userTotalGems - $amount;
 
-        Gem::updateOrCreate(
-            ['user_id' => $userId],
-            ['quantity' => $userTotalGemsAfterSpend]
-        );
+        try {
+            DB::transaction(function () use ($userId, $amount, $tag, $userTotalGemsAfterSpend) {
+                Transaction::create([
+                    'tag' => $tag,
+                    'user_id' => $userId,
+                    'amount' => $amount,
+                    'type' => TransactionType::Withdraw,
+                ]);
+
+                Gem::findByUserId($userId)->update([
+                    'quantity' => $userTotalGemsAfterSpend
+                ]);
+            });
+        } catch (\Exception $ex) {
+            throw new GemNotSpentException("Cannot spend User's gems: {$ex->getMessage()}");
+        }
 
         return $userTotalGemsAfterSpend;
     }
 
-
-    /**
-     * Calculate total User's Gems.
-     *
-     * @param integer $userId
-     * @return integer $totalGems
-     * @throws UserNotFoundException
-     */
-    public function calculateTotalGems(int $userId): int
-    {
-        $transactions = Transaction::where('user_id', $userId);
-
-        if (!$transactions->exists())
-            throw new UserNotFoundException("User not found.");
-
-        return $transactions->selectRaw("
-                SUM(CASE WHEN type='" . TransactionType::Deposit->value . "' THEN amount ELSE 0 END) - 
-                SUM(CASE WHEN type='" . TransactionType::Withdraw->value . "' THEN amount ELSE 0 END) AS balance")
-            ->pluck('balance')->first();
-    }
 }
